@@ -1,4 +1,34 @@
 
+#' Calculates the padding mask based on which embeddings are all zero.
+#' 
+#' emb Tensor with shape [..., depth]
+#' 
+#' Returns:
+#'   a float Tensor with shape [...]. Each element is 1 if its 
+#'   corresponding embedding vector is all zero, and is 0 otherwise.
+embedding_to_padding <- function(emb) {
+  emb_sum <- tf$reduce_sum(tf$abs(emb), axis = -1L)
+  tf$to_float(tf$equal(emb_sum, 0))
+}
+
+
+#' Reshape input by splitting length over blocks of memory_block_size.
+#'
+#' x Tensor [batch, heads, length, depth]
+#' x_shape tf$TensorShape of x
+#' memory_block_size Integer to dividing length by
+#' Return 
+#'   Tensor [batch, heads, length %/% memory_block_size, memory_block_size, depth]
+reshape_by_blocks <- function(x, x_shape, memory_block_size) {
+  x <- tf$reshape(x,
+                  list(x_shape[[1]], x_shape[[2]], 
+                       as.integer(x_shape[[3]] %/% memory_block_size), 
+                       memory_block_size, x_shape[[4]]))
+  x
+}
+
+
+
 #' Reshape x so that the last dimension becomes two dimensions.
 split_last_dimension <- function(x, n) {
   x_shape <- shape_list2(x)
