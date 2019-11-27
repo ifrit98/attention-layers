@@ -1,4 +1,30 @@
 
+#' Maybe set max_area_height/width parameters if invalid.
+validate_max_area_parameters <- function(max_area_width, max_area_height, features_shape) {
+  if (is.null(max_area_width) | is.null(max_area_height)) {
+    pairs <- calculate_divisor_pairs(features_shape[[2]])
+    n     <- length(pairs) %/% 2
+    print(sprintf(
+      "Setting (max_area_width, max_area_height) to (%s, %s)",
+      pairs[[n]][[1]],
+      pairs[[n]][[2]]
+    ))
+    max_area_height <- pairs[[n]][[1]]
+    max_area_width  <- pairs[[n]][[2]]
+  }
+  
+  if(!list(c(max_area_width, max_area_height)) %in% pairs) {
+    stop(paste(
+      "(max_area_width ,max_area_height) must be a pair that",
+      "divides (length) evenly, got", c(max_area_width, max_area_height), "\n\n"),
+      "Please select (max_area_width, max_area_height) from one of these pairs:\n",
+      pairs)
+  }
+  
+  c(max_area_width, max_area_height)
+}
+
+
 #' Calculates the padding mask based on which embeddings are all zero.
 #' 
 #' emb Tensor with shape [..., depth]
@@ -126,8 +152,8 @@ compute_qkv <-
            value_depth = 64L,
            q_filter_width = 1L,
            kv_filter_width = 1L,
-           q_padding = 'valid',
-           kv_padding = 'valid',
+           q_padding = 'same',
+           kv_padding = 'same',
            vars_3d_num_heads = 0L) {
     
     if (is.null(memory))
@@ -147,7 +173,7 @@ compute_qkv <-
                                      vars_3d_num_heads)
     
     v <- compute_attention_component(memory,
-                                     key_depth,
+                                     value_depth,
                                      kv_filter_width,
                                      kv_padding,
                                      "v",
@@ -165,16 +191,16 @@ compute_qkv <-
 compute_attention_component <- function(antecedent,
                                         depth,
                                         filter_width = 1L,
-                                        padding = 'valid',
+                                        padding = 'same',
                                         name = 'c',
                                         vars_3d_num_heads = 0L) {
   if (vars_3d_num_heads > 0) {
     stopifnot(filter_width == 1)
     
-    input_shape <- shape_list2(antecedent)
-    input_depth <- input_shape[[length(input_shape)]]
+    input_shape    <- shape_list2(antecedent)
+    input_depth    <- input_shape[[length(input_shape)]]
+    stddev         <- input_depth ^ (-0.5)
     depth_per_head <- depth %/% vars_3d_num_heads
-    stddev <- input_depth ^ (-0.5)
     
     if ("q" %in% name)
       stddev %<>% `*`(depth_per_head ^ (-0.5))

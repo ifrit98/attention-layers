@@ -1,3 +1,440 @@
+#' Pools for an area in features_2d.
+.pool_one_shape <-
+  function(features_2d,
+           area_width,
+           area_height,
+           batch,
+           width,
+           height,
+           depth,
+           fn = tf$reduce_max,
+           name = NULL) {
+    
+    s <- tf$keras$backend$get_session()
+    
+    images <- list()
+    
+    i <- 1L
+    for (y_shift in seq(0L, area_height-1L)) {
+      image_height <- tf$maximum(height - area_height + 1L + y_shift, 0L)
+      for (x_shift in seq(0L, area_width-1L)) {
+        image_width <- tf$maximum(width - area_width + 1L + x_shift, 0L)
+        area <- 
+          features_2d[ , y_shift:image_height, x_shift:image_width, , style = "python"]
+        # c(h, w) %<-% s$run(list(image_height, image_width))
+        # print(h)
+        # print(w)
+        # print(area)
+        flatten_area <- tf$reshape(area, list(batch, -1L, depth, 1L))
+        images[[i]]  <- flatten_area
+        
+        i <- i + 1L
+      }
+    }
+    
+    image_tensor <- tf$concat(images, axis = 3L)
+    max_tensor   <- fn(image_tensor, axis = 3L)
+
+    max_tensor
+  }
+
+
+
+#' Pools for each area based on a given pooling function (fn)
+#' @export
+#'
+#' @param features a Tensor in a shape of [batch_size, height * width, depth]
+#' @param max_area_width the max width allowed for an area.
+#' @param max_area_height the max height allowed for an area.
+#' @param fn the TF function for the pooling.
+#' @param name the namescope.
+#' 
+#' @return pool_results: A Tensor of shape [batch_size, num_areas, depth]
+#' @return area_heights: A Tensor of shape [batch_size, num_areas, 1]
+#' @return area_widths:  A Tensor of shape [batch_size, num_areas, 1]
+basic_pool <-
+  function(features = tf$random$normal(shape = list(8L, 256L, 32L)),
+           max_area_width = NULL,
+           max_area_height = NULL,
+           height = 1L,
+           fn = tf$reduce_max,
+           name = NULL) {
+    
+    # with(tf$name_scope(name, default_name = "basic_pool"), {
+      feature_shape <- shape_list2(features)
+      batch         <- feature_shape[[1]]
+      length        <- feature_shape[[length(feature_shape) - 1L]]
+      
+      if (!height %in% powers_of_2(log2(length)-1L))
+        stop("height must be a power of 2, or shape mismatches may occur.")
+      
+      depth         <- feature_shape[[length(feature_shape)]]
+      height        <- as.integer(height)
+      width         <- as.integer(length %/% height)
+      
+      c(max_area_width, max_area_height) %<-%
+        validate_max_area_parameters(max_area_width, max_area_height, feature_shape)
+      
+      max_area_width  <- as.integer(max_area_width)
+      max_area_height <- as.integer(max_area_height)
+      
+      features_2d <-
+        tf$reshape(features, list(batch, height, width, depth))
+      
+      height_list   <- list()
+      width_list    <- list()
+      pool_list     <- list()
+      
+      size_tensor <-
+        tf$ones_like(features_2d[, , , 0L, style = "python"], dtype = tf$int32)
+      
+      i <- 1L
+      for (area_height in seq(0L, max_area_height - 1L)) {
+        for (area_width in seq(0L, max_area_width - 1L)) {
+          pool_tensor = .pool_one_shape(
+            features_2d,
+            area_width  = area_width  + 1L,
+            area_height = area_height + 1L,
+            batch       = batch,
+            width       = width,
+            height      = height,
+            depth       = depth,
+            fn          = fn
+          )
+          
+          pool_list[[i]] <-
+            tf$reshape(pool_tensor, list(batch, -1L, depth))
+          
+          h <- 
+            size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * 
+            tf$cast((area_height + 1L), tf$int32)
+            # size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * (area_height + 1L)
+          
+          height_list[[i]] <- tf$reshape(h, list(batch, -1L))
+          
+          w <- 
+            size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * 
+            tf$cast((area_width + 1), tf$int32)
+          
+          width_list[[i]] <- tf$reshape(w, list(batch, -1L))
+            # tf$reshape(size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * (area_width + 1), list(batch, -1L))
+          
+          i <- i + 1L
+        }
+      
+      }
+
+      pool_results <- tf$concat(pool_list, axis = 1L)
+      area_heights <-
+        tf$expand_dims(tf$concat(height_list, axis = 1L), 2L)
+      area_widths  <-
+        tf$expand_dims(tf$concat(width_list, axis = 1L), 2L)
+    # })
+    
+    c(pool_results, area_heights, area_widths)
+  }
+
+
+#' Compute area sums for features
+#' @param features: a Tensor in a shape of [batch_size, height * width, depth].
+#' @param max_area_width the max width allowed for an area.
+#' @param max_area_height the max height allowed for an area. (default for 1D case)
+#' @param height the height of the image. (default for 1D case)
+#' @param name the namescope.
+#' @return sum_image
+#' @return area_heights
+#' @return area_widths
+.compute_sum_image <- 
+  function(features = tf$random$normal(shape = list(8L, 512L, 32L)), 
+           max_area_width = NULL, max_area_height = NULL) {
+    
+    features_shape  <- shape_list2(features)
+    batch           <- features_shape[[1]]
+    length          <- features_shape[[length(features_shape)-1L]]
+    depth           <- features_shape[[length(features_shape)]]
+    
+    c(max_area_width, max_area_height) %<-% 
+      validate_max_area_parameters(max_area_width, max_area_height, features_shape)
+
+    max_area_height <- as.integer(max_area_height)
+    max_area_width  <- as.integer(max_area_width)
+    
+    features_2d <- 
+      tf$reshape(features, list(batch, max_area_height, max_area_width, depth))
+    
+    width_cum <- 
+      tf$cumsum(features_2d, axis = -2L, name = "compute_integral_h")
+    
+    integral_image <- 
+      tf$cumsum(width_cum, axis = -3L, name = "compute_integral_v")
+    
+    padded_image <- 
+      tf$pad(integral_image, list(c(0L, 0L),
+                                  c(1L, 0L),
+                                  c(1L, 0L),
+                                  c(0L, 0L)), constant_values = 0L)
+    
+    length.out      <- max_area_width * max_area_height
+    height_list     <- vector("list", length.out)
+    width_list      <- vector("list", length.out)
+    dst_images      <- vector("list", length.out)
+    src_images_diag <- vector("list", length.out)
+    src_images_h    <- vector("list", length.out)
+    src_images_v    <- vector("list", length.out)
+    
+    image_shape <- shape_list2(padded_image)
+    size_tensor <- tf$ones(shape = image_shape[1:length(image_shape)-1],
+                           dtype = tf$int32)
+    i <- 1L
+    for (height in seq(0L, max_area_height-1L)) { # or seq(1L, max_height)
+      for (width in seq(0L, max_area_width-1L)) { # or seq(1L, max_width)
+        
+        dst_images[[i]] <-
+          padded_image[, `(height + 1):`, `(width + 1):`, , style="python"] %>%
+          tf$reshape(list(batch, -1L, depth))
+
+        src_images_diag[[i]] <-
+          padded_image[, `:-height - 1`, `:-width - 1`, , style="python"] %>%
+          tf$reshape(list(batch, -1L, depth))
+
+        src_images_h[[i]] <-
+          padded_image[, `(height + 1):`, `:-width - 1`, , style = "python"] %>%
+          tf$reshape(list(batch, -1L, depth))
+        
+        src_images_v[[i]] <-
+          padded_image[, `-height - 1:`, `width + 1:`, , style = "python"] %>%
+          tf$reshape(list(batch, -1L, depth))
+
+        height_list[[i]] <-
+          tf$reshape(size_tensor[, `height + 1:`, `width + 1:`, style = "python"] *
+                       (height + 1L),
+                     list(batch, -1L))
+        width_list[[i]] <-
+          tf$reshape(size_tensor[, `height + 1:`, `width + 1:`, style = "python"] *
+                       (height + 1L),
+                     list(batch, -1L))
+        i <- i + 1L
+      }
+    }
+    
+    sum_image <- tf$subtract(
+      tf$concat(dst_images, axis = 1L) + tf$concat(src_images_diag, axis = 1L),
+      tf$concat(src_images_v, axis = 1L) + tf$concat(src_images_h, axis = 1L))
+    
+    area_heights <- tf$expand_dims(tf$concat(height_list, axis = 1L), 2L)
+    area_widths  <- tf$expand_dims(tf$concat(width_list, axis = 1L), 2L)
+    
+    c(sum = sum_image, heights = area_heights, widths = area_widths)
+  }
+
+
+
+#' Computes features for each area.
+#' @return area_mean: A Tensor of shape [batch_size, num_areas, depth]
+#' @return area_std: A Tensor of shape [batch_size, num_areas, depth]
+#' @return area_sum: A Tensor of shape [batch_size, num_areas, depth]
+#' @return area_heights: A Tensor of shape [batch_size, num_areas, 1]
+#' @return area_widths: A Tensor of shape [batch_size, num_areas, 1]
+compute_area_features <-
+  function(features,
+           max_area_width = NULL,
+           max_area_height = NULL,
+           epsilon = 1e-6) {
+    c(area_sum, area_heights, area_widths) %<-% 
+      .compute_sum_image(features, max_area_width, max_area_height)
+
+    c(area_sq_sum, unused1, unused2) %<-% 
+      .compute_sum_image(tf$pow(features, 2L), 
+                         max_area_width, 
+                         max_area_height)
+    
+    sizes <- 
+      tf$multiply(area_heights, area_widths) %>% 
+      tf$cast(dtype = tf$float32)
+    
+    area_mean     <- tf$math$divide(area_sum, sizes)
+    sq_area_mean  <- tf$math$divide(area_sq_sum, sizes)
+    area_variance <- tf$subtract(sq_area_mean, tf$pow(area_mean, 2L))
+    area_std      <- tf$sqrt(tf$abs(area_variance) + epsilon)
+    
+    c(area_mean, area_std, area_sum, area_heights, area_widths)
+  }
+
+
+#' Computes the key for each area.
+#' 
+#' @param features a Tensor in a shape of [batch_size, height * width, depth].
+#' @param max_area_width: the max width allowed for an area.
+#' @param max_area_height: the max height allowed for an area.
+#' @param height: the height of the image.
+#' @param mode: whether to combine different area features or only use
+#' the vector mean of each area, which can be "mean", "concat", "sum",
+#' "sample_concat", and "sample_sum".
+#' @return Tensor of shape [batch, num_areas, depth]
+compute_area_key <-
+  function(features,
+           max_area_width,
+           max_area_height = 1L,
+           height = 1L,
+           mode = "mean",
+           training = TRUE,
+           name = NULL) {
+    
+    stopifnot(
+      mode %in% c("mean", "max", "concat", "sum", "sample_concat", "sample_sum"))
+    
+    c(area_mean, area_std, unused, area_heights, area_widths) %<-% 
+      compute_area_features(features, max_area_width, max_area_height, height)
+    
+    if (mode == "mean") 
+      return(area_mean)
+    else if (mode == "max") {
+      c(area_max, unused, unused2) <- 
+        basic_pool(features, max_area_width, max_area_height)
+      return(area_max)
+    }
+    else if (mode == "sample") {
+      if (training)
+        area_mean <- 
+          area_mean + (area_std * tf$random_normal(tf$shape(area_std)))
+      return(area_mean)
+    }
+    
+    browser()
+    depth <- tail(shape_list2(area_mean), 1)
+    
+    ## Combine area features
+    ###################### Embeddings? TEST THIS #################################
+    height_embed <- tf$nn$embedding_lookup(
+      params = tf$get_variable("area_height_emb", list(max_area_height %/% 2)),
+      ids = area_heights[, , 0, style = "pythoin"] - 1L)
+    
+    width_embed <- tf$nn$embedding_lookup(
+      params = tf$get_variable("area_width_emb", list(max_area_width %/% 2)),
+      ids = area_widths[, , 0, style = "pythoin"] - 1L)
+    
+    size_embed <- tf$concat(list(height_embed, width_embed))
+    
+    if (mode == "concat") 
+      feature_concat <- tf$concat(list(area_mean, area_std, size_embed), -1L)
+    else if (mode == "max_concat") {
+      c(area_max, unused, unused2) %<-% 
+        basic_pool(features, max_area_width, max_area_height)
+      feature_concat <- tf$concat(list(area_max, size_embed), -1L)
+    }
+    else if (mode == "sum") 
+      feature_concat <- size_embed + area_mean + area_std
+    else if (mode == "sample_concat") {
+      if (training)
+        area_mean <- 
+          area_mean + (area_std * tf$random$normal(tf$shape(area_std)))
+      feature_concat <- area_mean + size_embed
+    }
+    else 
+      stop(cat(paste("Unsupported area key mode", mode)))
+    
+    feature_hidden <- layer_dense(feature_concat, depth, activation = 'relu')
+    area_key       <- layer_dense(feature_hidden, depth)
+    
+    area_key
+  }
+    
+
+#TODO: add dot_product_area_attention
+#' Dot product area attention
+#' 
+#' @param q Tensor with shape [..., length_q, depth_k].
+#' @param k Tensor with shape [..., length_kv, depth_k]. 
+#'   Leading dimensions must match with q.
+#' @param v: Tensor with shape [..., length_kv, depth_v] 
+#'   Leading dimensions must match with q.
+#'   
+#' Returns Tensor with shape [..., length_q, depth_v].
+dot_product_area_attention_1d <- function(q,
+                                          k,
+                                          v,
+                                          bias = NULL,
+                                          dropout = 0, 
+                                          max_area_width = 1L,
+                                          max_area_height = 1L,
+                                          area_height = 1L,
+                                          area_key_mode = "mean",
+                                          area_value_mode = "sum",
+                                          top_k_areas = 0L,
+                                          name = NULL,
+                                          training = TRUE) {
+  
+  mem_shape <- shape_list2(k)
+  batch     <- mem_shape[[1]]
+  head_size <- mem_shape[[2]]
+  length    <- mem_shape[[3]]
+  depth     <- mem_shape[[4]]
+
+  k_area <- compute_area_key(
+    tf$reshape(k, list(-1L, length, depth)),
+    max_area_width  = max_area_width,
+    max_area_height = max_area_height,
+    mode            = area_key_mode,
+    training        = training)
+  
+  if (area_value_mode == "mean")
+    c(v_area, unused, unused2, unused3, unused4) %<-% basic_pool(
+      tf$reshape(v, list(-1L, length, depth)),
+      max_area_width,
+      max_area_height,
+      fn = tf$reduce_max)
+  else if (area_value_mode == "max")
+    c(v_area, unused, unused2, unused3, unused4) %<-% compute_area_features(
+      tf$reshape(v, list(-1L, length, depth)), max_area_width, max_area_height)
+  else if (area_value_mode == "sum") {
+    c(unused, unused2, v_area, unused3, unused4) %<-% compute_area_features(
+      tf$reshape(v, list(-1L, length, depth)), 
+    max_area_width,
+    max_area_height)
+  }
+  else stop(paste("Unsuported area value mode", mode))
+  
+  k <- tf$reshape(k_area, list(batch, head_size, -1L, depth))
+  v <- tf$reshape(v_area, list(batch, head_size, -1L, depth))
+  
+  logits <- tf$matmul(q, k, transpose_b = TRUE)
+  
+  if (!is.null(bias)) {
+    bias <- cast_like(bias, logits)
+    bias_shape <- shape_list2(bias)
+    mem_length <- bias_shape[[length(bias_shape)]]
+    bias_value <- tf$reshape(
+      tf$to_float(tf$less(bias, -1L)), list(-1L, mem_length, -1L))
+    c(unused, unuse2, padding_sum, unused3, unused4) %<-% 
+      compute_area_features(bias_value, max_area_width, max_area_height)
+    bias <- tf$where(
+      tf$cast(tf$to_int32(padding_sum), tf$bool),
+      tf$fill(tf$shape(padding_sum), -Inf),
+      tf$zeros_like(padding_sum, dtype = tf$float32))
+    bias <- 
+      tf$reshape(bias,
+                 list(bias_shape[[1]], bias_shape[[2]], bias_shape[[3]], -1L))
+    logits <- logits + bias
+  }
+  
+  weights <- tf$nn$softmax(logits, name = "attention_weights")
+  
+  if (top_k_areas > 0) {
+    tf$logging$info("area_attention top_k_areas=%d", top_k_areas)
+    
+    top_k <- tf$minimum(tail(shape_list2(weights), 1), top_k_areas)
+    c(top_weights, unused) %<-% tf$nn$top_k(weights, k = top_k)
+    
+    min_values <- tf$reduce_min(top_weights, -1L, keepdims = TRUE)
+    weights    <- tf$where(tf$greater_equal(weights, min_values),
+                           weights, tf$zeros_like(weights))
+    weights    <- tf$div(weights, tf$reduce_sum(weights, -1L, keepdims = TRUE))
+  }
+  
+  weights <- layer_dropout(weights, dropout)
+  
+  tf$matmul(weights, v)  
+}
 
 
 
@@ -9,21 +446,20 @@ layer_multihead_attention <- function(query,
                                       output_depth = 128L,
                                       num_heads = 4L,
                                       dropout = 0,
-                                      attention_type = "dot_product",
+                                      attention_type = "dot_product_area",
                                       q_filter_width = 1L,
                                       kv_filter_width = 1L,
-                                      q_padding = "VALID",
-                                      kv_padding = "VALID",
-                                      max_area_width = 1L,
-                                      max_area_height = 1L,
-                                      memory_height = 1L,
+                                      q_padding = "same",
+                                      kv_padding = "same",
+                                      max_area_width = NULL,
+                                      max_area_height = NULL,
+                                      area_height = 1L,
                                       area_key_mode = "mean",
                                       area_value_mode = "sum",
                                       vars_3d = TRUE) {
   
   layer_lambda(list(query, memory), function(x) {
     stopifnot(key_depth %% num_heads == 0, value_depth %% num_heads == 0)
-
     if (typeof(x) == "list" & length(x) > 1) # if (any(grepl("list", class(x)))) 
       c(query, memory) %<-% x
     else 
@@ -31,12 +467,12 @@ layer_multihead_attention <- function(query,
     
     vars_3d_num_heads <- if (vars_3d) num_heads else 0
 
-    c(q, k, v) %<-% layer_compute_qkv(query = query, 
-                                      memory = memory, 
-                                      key_depth = key_depth, 
-                                      value_depth = value_depth, 
-                                      q_filter_width = q_filter_width, 
-                                      vars_3d_num_heads = vars_3d_num_heads)
+    c(q, k, v) %<-% compute_qkv(query = query, 
+                                memory = memory, 
+                                key_depth = key_depth, 
+                                value_depth = value_depth, 
+                                q_filter_width = q_filter_width, 
+                                vars_3d_num_heads = vars_3d_num_heads)
 
     q <- split_heads(q, num_heads)
     k <- split_heads(k, num_heads)
@@ -47,25 +483,27 @@ layer_multihead_attention <- function(query,
     if (!vars_3d) 
       q %<>% `*`(key_depth_per_head^(-0.5))
     
-    bias <- NULL
     if (attention_type == "dot_product")
-      if (max_area_width > 1 | max_area_height > 1)
-        x <- dot_product_area_attention_1d(q, k, v, bias, dropout)
+      x <- dot_product_attention_1d(q, k, v, bias, dropout)
+    else if (attention_type == "dot_product_area")
+      x <- dot_product_area_attention_1d(
+        q, k, v, bias, dropout, max_area_width, max_area_height, area_height)
     else
-      x <- layer_dot_product_attention_1d(q, k, v, bias, dropout)
-    else
-      stop("Other attention types currently unimplemented...")
+      stop(paste("attention_types other than (dot_product, dot_product_area)",
+                 "currently unimplemented..."))
     
-    x <- combine_heads(x)
-    
+    x       <- combine_heads(x)
     x_shape <- shape_list2(x)
     
     x <- 
       if (vars_3d)
-        tf$get_variable("o", list(num_heads,
-                                  as.integer(value_depth %/% num_heads),
-                                  output_depth),
-                        initializer = tf$glorot_normal_initializer) %>% 
+        tf$compat$v1$get_variable(
+          name  = "output_kernel_3d",
+          shape = list(num_heads,
+                       as.integer(value_depth %/% num_heads),
+                       output_depth),
+          initializer = tf$glorot_normal_initializer
+        ) %>% 
         tf$cast(x$dtype) %>% 
         tf$reshape(list(value_depth, output_depth)) %>% 
         {tf$tensordot(x, ., axes = 1L)}
@@ -87,9 +525,21 @@ layer_multihead_attention <- function(query,
 
 
 #' Multihead attention mechanism
-#' query  [batch, seqlen, depth_q]
-#' memory [batch, seqlen, depth_m]
+#' 
+#' With num_heads == 1, becomes simple dot product attention
+#' @param query  Tensor [batch, seqlen, depth_q]
+#' @param memory Tensor [batch, seqlen, depth_m]
+#' @param bias Bias tensor passed to attention function
+#' @param key_depth Specify units for key component
+#' @param value_depth Specify units for value component
+#' @param output_depth Specify feature dim of final output
+#' @param num_heads Specify number of heads to break input space up by
+#' @param dropout Float value to add dropout to attention function
+#' @param attention_type Character value of attention type
+#' @param vars_3d use 3-dimensional variables for input/output transformations
+#' TODO: hard_attention_k: integer, if > 0 triggers hard attention (picking top-k).
 #' @export
+#' TODO: Add callable option to attention_type
 multihead_attention <- function(query,
                                 memory = NULL,
                                 bias = NULL,
@@ -101,24 +551,24 @@ multihead_attention <- function(query,
                                 attention_type = "dot_product",
                                 q_filter_width = 1L,
                                 kv_filter_width = 1L,
-                                q_padding = "VALID",
-                                kv_padding = "VALID",
+                                q_padding = "same",
+                                kv_padding = "same",
                                 max_area_width = 1L,
                                 max_area_height = 1L,
-                                memory_height = 1L,
+                                area_height = 1L,
                                 area_key_mode = "mean",
                                 area_value_mode = "sum",
                                 vars_3d = FALSE) {
-  
   stopifnot(key_depth %% num_heads == 0, value_depth %% num_heads == 0)
 
   vars_3d_num_heads <- if (vars_3d) num_heads else 0
-  
-  c(q, k, v) %<-% layer_compute_qkv(query, 
+  browser()
+  c(q, k, v) %<-% compute_qkv(query, 
                               memory, 
                               key_depth, 
                               value_depth, 
                               q_filter_width, 
+                              kv_filter_width,
                               vars_3d_num_heads = vars_3d_num_heads)
 
   q <- split_heads(q, num_heads)
@@ -130,18 +580,38 @@ multihead_attention <- function(query,
   if (!vars_3d) 
     q %<>% `*`(key_depth_per_head^(-0.5))
 
-  bias <- NULL
   if (attention_type == "dot_product")
-    if (max_area_width > 1 | max_area_height > 1)
-      x <- dot_product_area_attention_1d(q, k, v, bias, dropout)
-    else
-      x <- layer_dot_product_attention_1d(q, k, v, bias, dropout)
+    x <- dot_product_area_attention_1d(q, k, v, bias, dropout)
+  else if (attention_type == "dot_product_area")
+    x <- dot_product_area_attention_1d(
+      q, k, v, bias, dropout, max_area_width, max_area_height, area_height)
   else
-    stop("Other attention types currently unimplemented...")
+    stop("No other attention types currently implemented...")
 
   x <- combine_heads(x)
-  x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
+  # x_shape <- shape_list2(x)
   
+  x <- 
+    if (vars_3d)
+      tf$compat$v1$get_variable(
+        name  = "output_kernel_3d",
+        shape = list(num_heads,
+                     as.integer(value_depth %/% num_heads),
+                     output_depth),
+        initializer = tf$glorot_normal_initializer
+      ) %>% 
+      tf$cast(x$dtype) %>% 
+      tf$reshape(list(value_depth, output_depth)) %>% 
+      {tf$tensordot(x, ., axes = 1L)}
+    else
+      layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
+      # tf$matmul(x,
+      #           tf$compat$v1$get_variable(
+      #             name  = "output_kernel",
+      #             shape = list(x_shape[[length(x_shape)]], output_depth),
+      #             dtype = x$dtype,
+      #             trainable = TRUE
+      #           ))
   x
 }
 
@@ -161,6 +631,7 @@ dot_product_attention_1d <-
            bias = NULL,
            dropout = 0,
            name = "dot_product_attention") {
+    browser()
     q_shape <- shape_list2(q)
     scalar  <-
       tf$math$rsqrt(tf$cast(q_shape[[length(q_shape)]], tf$float32))
@@ -209,7 +680,8 @@ layer_dot_product_attention_1d <-
 
 # TODO: make lambda R6 layer
 # Expecting shape(x) == (batch, maxtime, units)
-# Ref: https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L5020
+# Ref: https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/
+# layers/common_attention.py#L5020
 self_attention_simple <-
   function(x,
            filter_depth = 32L,
@@ -244,10 +716,10 @@ layer_self_attention_simple <-
     layer_lambda(x, function(x) {
       x_shape <- shape_list2(x)
       
-      c(q, k, v) %<-% layer_create_qkv(x, filter_depth, num_parts, share_kv)
+      c(q, k, v) %<-% create_qkv(x, filter_depth, num_parts, share_kv)
       
       bias <- NULL
-      x <- layer_dot_product_attention_1d(q, k, v, bias, dropout)
+      x <- dot_product_attention_1d(q, k, v, bias, dropout)
       x <- tf$reshape(x, list(x_shape[[1]], x_shape[[2]], filter_depth))
       x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
       
@@ -264,7 +736,7 @@ layer_self_attention_simple <-
 .compute_attention_component <- function(antecedent,
                                          depth,
                                          filter_width = 1L,
-                                         padding = 'valid',
+                                         padding = 'same',
                                          name = 'c',
                                          vars_3d_num_heads = 0L) {
   layer_lambda(x, function(x) {
@@ -315,8 +787,8 @@ layer_compute_qkv <- function(query,
                               value_depth = 64L,
                               q_filter_width = 1L,
                               kv_filter_width = 1L,
-                              q_padding = 'valid',
-                              kv_padding = 'valid',
+                              q_padding = 'same',
+                              kv_padding = 'same',
                               vars_3d_num_heads = 0L) {
   
   x <- if(!is.null(memory)) c(query, memory) else query
@@ -330,21 +802,21 @@ layer_compute_qkv <- function(query,
     
     if (is.null(memory))
       memory <- query
-    q <- .compute_attention_component(query,
+    q <- compute_attention_component(query,
                                       key_depth,
                                       q_filter_width,
                                       q_padding,
                                       name = "q",
                                       vars_3d_num_heads = vars_3d_num_heads)
     
-    k <- .compute_attention_component(memory,
+    k <- compute_attention_component(memory,
                                       key_depth,
                                       kv_filter_width,
                                       kv_padding,
                                       name = "k",
                                       vars_3d_num_heads = vars_3d_num_heads)
     
-    v <- .compute_attention_component(memory,
+    v <- compute_attention_component(memory,
                                       key_depth,
                                       kv_filter_width,
                                       kv_padding,
@@ -620,7 +1092,7 @@ layer_local_attention_1d <- function(q,
     depth_v <- shape_v[[length(shape_v)]]
     
     output <- 
-      layer_dot_product_attention_1d(
+      dot_product_attention_1d(
         q, k, v, attention_bias, name = "local_1d") %>% 
       tf$reshape(list(batch, num_heads, original_length, depth_v))
     
@@ -636,23 +1108,12 @@ layer_local_attention_1d <- function(q,
 }
 
 
-                          
-                          
-                          
-num_heads <- 4L
-x <- tf$random$normal(list(16L, 8192L, 64L))
-c(q,k,v) %<-% compute_qkv(x)
-q <- split_heads(q, num_heads)
-k <- split_heads(k, num_heads)
-v <- split_heads(v, num_heads)
-y <- local_attention_1d(q, k, v)
 
-
-
+# TODO: Convert above layer lambda to R6 class or custom keras model
 # Via tensor2tensor framework
 # Strided block local self-attention.
-# https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L3118
-# https://github.com/tensorflow/tensor2tensor/blob/23bd23b9830059fbc349381b70d9429b5c40a139/tensor2tensor/layers/common_attention.py#L1858
+# https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/
+# common_attention.py#L3118
 LocalSelfAttentionTF <- R6::R6Class(
   "LocalSelfAttentionTF",
   
@@ -907,8 +1368,6 @@ layer_local_self_attention <- function(object,
   )
 }
 
-# x <- tf$random$normal(shape = list(16L, 256L, 64L))
-# l <- layer_local_self_attention(units = 512, attention_width = 10) 
-# (y <- l(x))
+
 
 
