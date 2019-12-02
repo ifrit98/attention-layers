@@ -1,27 +1,28 @@
 
 #' Maybe set max_area_height/width parameters if invalid.
-validate_max_area_parameters <- function(max_area_width, max_area_height, features_shape) {
-  if (is.null(max_area_width) | is.null(max_area_height)) {
-    pairs <- calculate_divisor_pairs(features_shape[[2]])
-    n     <- length(pairs) %/% 2
+validate_area_parameters <- function(width, height, features_shape) {
+  pairs <- calculate_divisor_pairs(features_shape[[2]])
+  
+  if (is.null(width) || is.null(height)) {
+    n <- length(pairs) %/% 2
     print(sprintf(
-      "Setting (max_area_width, max_area_height) to (%s, %s)",
+      "Setting (width, height) to (%s, %s)",
       pairs[[n]][[1]],
       pairs[[n]][[2]]
     ))
-    max_area_height <- pairs[[n]][[1]]
-    max_area_width  <- pairs[[n]][[2]]
+    height <- pairs[[n]][[1]]
+    width  <- pairs[[n]][[2]]
   }
   
-  if(!list(c(max_area_width, max_area_height)) %in% pairs) {
+  if(!list(c(width, height)) %in% pairs) {
     stop(paste(
-      "(max_area_width ,max_area_height) must be a pair that",
-      "divides (length) evenly, got", c(max_area_width, max_area_height), "\n\n"),
-      "Please select (max_area_width, max_area_height) from one of these pairs:\n",
-      pairs)
+      "(width, height) must be a pair that",
+      "divides (length) evenly, got: "), paste0("(", width, ", ", height, ")"),
+      "\nPlease select (height) from one of the following values:\n",
+      list(unlist(pairs)[seq(length(pairs) * 2, by = -2)]))
   }
   
-  c(max_area_width, max_area_height)
+  c(as.integer(width), as.integer(height))
 }
 
 
@@ -205,16 +206,30 @@ compute_attention_component <- function(antecedent,
     if ("q" %in% name)
       stddev %<>% `*`(depth_per_head ^ (-0.5))
     
-    var <- tf$compat$v1$get_variable(
-      name = name,
-      shape = list(
-        input_depth,
-        vars_3d_num_heads,
-        as.integer(depth %/% vars_3d_num_heads)
+    var <- tf$Variable(
+      tf$random$normal(
+        shape = list(
+          input_depth,
+          vars_3d_num_heads,
+          as.integer(depth %/% vars_3d_num_heads)
+        ),
+        stddev = stddev,
+        dtype = antecedent$dtype,
+        name = name
       ),
-      initializer = tf$random_normal_initializer(stddev = stddev),
-      dtype = antecedent$dtype
+      name = name
     )
+    
+    # var <- tf$compat$v1$get_variable(
+    #   name = name,
+    #   shape = list(
+    #     input_depth,
+    #     vars_3d_num_heads,
+    #     as.integer(depth %/% vars_3d_num_heads)
+    #   ),
+    #   initializer = tf$random_normal_initializer(stddev = stddev),
+    #   dtype = antecedent$dtype
+    # )
     
     var <- var %>% tf$reshape(shape = list(input_depth, depth))
     
@@ -229,4 +244,3 @@ compute_attention_component <- function(antecedent,
   
   out
 }
-
