@@ -10,8 +10,6 @@
            fn = tf$reduce_max,
            name = NULL) {
     
-    s <- tf$keras$backend$get_session()
-    
     images <- list()
     
     i <- 1L
@@ -20,11 +18,8 @@
       for (x_shift in seq(0L, area_width-1L)) {
         image_width <- tf$maximum(width - area_width + 1L + x_shift, 0L)
         area <- 
-          features_2d[ , y_shift:image_height, x_shift:image_width, , style = "python"]
-        # c(h, w) %<-% s$run(list(image_height, image_width))
-        # print(h)
-        # print(w)
-        # print(area)
+          features_2d[ , y_shift:image_height, x_shift:image_width, , 
+                       style = "python"]
         flatten_area <- tf$reshape(area, list(batch, -1L, depth, 1L))
         images[[i]]  <- flatten_area
         
@@ -53,38 +48,31 @@
 #' @return area_heights: A Tensor of shape [batch_size, num_areas, 1]
 #' @return area_widths:  A Tensor of shape [batch_size, num_areas, 1]
 basic_pool <-
-  function(features = tf$random$normal(shape = list(8L, 256L, 32L)),
-           max_area_width = NULL,
-           max_area_height = NULL,
+  function(features = tf$random$normal(shape = list(8L, 512L, 32L)),
+           max_area_width,
+           max_area_height = 1L,
            height = 1L,
            fn = tf$reduce_max,
            name = NULL) {
-    
-    # with(tf$name_scope(name, default_name = "basic_pool"), {
       feature_shape <- shape_list2(features)
       batch         <- feature_shape[[1]]
       length        <- feature_shape[[length(feature_shape) - 1L]]
-      
-      if (!height %in% powers_of_2(log2(length)-1L))
-        stop("height must be a power of 2, or shape mismatches may occur.")
-      
       depth         <- feature_shape[[length(feature_shape)]]
       height        <- as.integer(height)
       width         <- as.integer(length %/% height)
       
-      c(max_area_width, max_area_height) %<-%
-        validate_max_area_parameters(max_area_width, max_area_height, feature_shape)
+      c(width, height) %<-%
+        validate_area_parameters(width, height, feature_shape)
       
-      max_area_width  <- as.integer(max_area_width)
-      max_area_height <- as.integer(max_area_height)
+      # if (is.null(max_area_width) || is.null(max_area_height))
+      #   c(max_area_width, max_area_height) %<-% c(width %/% 2, height %/% 2)
       
       features_2d <-
         tf$reshape(features, list(batch, height, width, depth))
       
-      height_list   <- list()
-      width_list    <- list()
-      pool_list     <- list()
-      
+      height_list <- list()
+      width_list  <- list()
+      pool_list   <- list()
       size_tensor <-
         tf$ones_like(features_2d[, , , 0L, style = "python"], dtype = tf$int32)
       
@@ -108,20 +96,16 @@ basic_pool <-
           h <- 
             size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * 
             tf$cast((area_height + 1L), tf$int32)
-            # size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * (area_height + 1L)
-          
-          height_list[[i]] <- tf$reshape(h, list(batch, -1L))
           
           w <- 
             size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * 
             tf$cast((area_width + 1), tf$int32)
           
-          width_list[[i]] <- tf$reshape(w, list(batch, -1L))
-            # tf$reshape(size_tensor[, area_height:NULL, area_width:NULL, style = "python"] * (area_width + 1), list(batch, -1L))
-          
+          height_list[[i]] <- tf$reshape(h, list(batch, -1L))
+          width_list[[i]]  <- tf$reshape(w, list(batch, -1L))
+
           i <- i + 1L
         }
-      
       }
 
       pool_results <- tf$concat(pool_list, axis = 1L)
@@ -129,9 +113,8 @@ basic_pool <-
         tf$expand_dims(tf$concat(height_list, axis = 1L), 2L)
       area_widths  <-
         tf$expand_dims(tf$concat(width_list, axis = 1L), 2L)
-    # })
-    
-    c(pool_results, area_heights, area_widths)
+      
+    c(pool = pool_results, heights = area_heights, widths = area_widths)
   }
 
 
@@ -146,21 +129,17 @@ basic_pool <-
 #' @return area_widths
 .compute_sum_image <- 
   function(features = tf$random$normal(shape = list(8L, 512L, 32L)), 
-           max_area_width = NULL, max_area_height = NULL) {
-    
+           max_area_width, max_area_height = 1L, .height = 1L) {
     features_shape  <- shape_list2(features)
     batch           <- features_shape[[1]]
     length          <- features_shape[[length(features_shape)-1L]]
     depth           <- features_shape[[length(features_shape)]]
+    .width          <- length %/% .height
     
-    c(max_area_width, max_area_height) %<-% 
-      validate_max_area_parameters(max_area_width, max_area_height, features_shape)
+    c(.width, .height) %<-% 
+      validate_area_parameters(.width, .height, features_shape)
 
-    max_area_height <- as.integer(max_area_height)
-    max_area_width  <- as.integer(max_area_width)
-    
-    features_2d <- 
-      tf$reshape(features, list(batch, max_area_height, max_area_width, depth))
+    features_2d <- tf$reshape(features, list(batch, .height, .width, depth))
     
     width_cum <- 
       tf$cumsum(features_2d, axis = -2L, name = "compute_integral_h")
@@ -186,8 +165,8 @@ basic_pool <-
     size_tensor <- tf$ones(shape = image_shape[1:length(image_shape)-1],
                            dtype = tf$int32)
     i <- 1L
-    for (height in seq(0L, max_area_height-1L)) { # or seq(1L, max_height)
-      for (width in seq(0L, max_area_width-1L)) { # or seq(1L, max_width)
+    for (height in seq(0L, max_area_height-1L)) { 
+      for (width in seq(0L, max_area_width-1L)) {
         
         dst_images[[i]] <-
           padded_image[, `(height + 1):`, `(width + 1):`, , style="python"] %>%
@@ -202,7 +181,7 @@ basic_pool <-
           tf$reshape(list(batch, -1L, depth))
         
         src_images_v[[i]] <-
-          padded_image[, `-height - 1:`, `width + 1:`, , style = "python"] %>%
+          padded_image[, `:-height - 1`, `width + 1:`, , style = "python"] %>%
           tf$reshape(list(batch, -1L, depth))
 
         height_list[[i]] <-
@@ -213,6 +192,13 @@ basic_pool <-
           tf$reshape(size_tensor[, `height + 1:`, `width + 1:`, style = "python"] *
                        (height + 1L),
                      list(batch, -1L))
+        
+        # print(paste("dst:     ", dst_images[[i]]))
+        # print(paste("src_diag:", src_images_diag[[i]]))
+        # print(paste("src_v:   ", src_images_v[[i]]))
+        # print(paste("src_h:   ", src_images_h[[i]]))
+        # print("")
+
         i <- i + 1L
       }
     }
@@ -257,8 +243,10 @@ compute_area_features <-
     area_variance <- tf$subtract(sq_area_mean, tf$pow(area_mean, 2L))
     area_std      <- tf$sqrt(tf$abs(area_variance) + epsilon)
     
-    c(area_mean, area_std, area_sum, area_heights, area_widths)
+    c(mean = area_mean, stddev = area_std, sum = area_sum, 
+      heights = area_heights, widths = area_widths)
   }
+
 
 
 #' Computes the key for each area.
@@ -276,12 +264,16 @@ compute_area_key <-
            max_area_width,
            max_area_height = 1L,
            height = 1L,
-           mode = "mean",
+           mode = "sample_concat",
+           hidden_activation = "relu",
            training = TRUE,
            name = NULL) {
     
-    stopifnot(
-      mode %in% c("mean", "max", "concat", "sum", "sample_concat", "sample_sum"))
+    # TODO: Error in modes: c("concat", "max_concat")
+    
+    stopifnot(mode %in% c("mean", "max", "concat", 
+                          "sum", "sample", "sample_concat", 
+                          "sample_sum", "max_concat"))
     
     c(area_mean, area_std, unused, area_heights, area_widths) %<-% 
       compute_area_features(features, max_area_width, max_area_height, height)
@@ -289,8 +281,8 @@ compute_area_key <-
     if (mode == "mean") 
       return(area_mean)
     else if (mode == "max") {
-      c(area_max, unused, unused2) <- 
-        basic_pool(features, max_area_width, max_area_height)
+      c(area_max, unused, unused2) %<-% 
+        basic_pool(features, max_area_width, max_area_height, height)
       return(area_max)
     }
     else if (mode == "sample") {
@@ -300,26 +292,29 @@ compute_area_key <-
       return(area_mean)
     }
     
-    browser()
-    depth <- tail(shape_list2(area_mean), 1)
-    
-    ## Combine area features
-    ###################### Embeddings? TEST THIS #################################
+    depth <- tail(shape_list2(area_mean), 1)[[1]]
+
     height_embed <- tf$nn$embedding_lookup(
-      params = tf$get_variable("area_height_emb", list(max_area_height %/% 2)),
-      ids = area_heights[, , 0, style = "pythoin"] - 1L)
+      params = tf$Variable(
+        tf$zeros(shape = list(max_area_height, depth %/% 2)), 
+        name = "area_height_emb"),
+      ids = area_heights[, , 0, style = "python"] - 1L
+    )
     
     width_embed <- tf$nn$embedding_lookup(
-      params = tf$get_variable("area_width_emb", list(max_area_width %/% 2)),
-      ids = area_widths[, , 0, style = "pythoin"] - 1L)
+      params = tf$Variable(
+        tf$zeros(shape = list(max_area_width, depth %/% 2)), 
+        name = "area_width_emb"),
+      ids = area_heights[, , 0, style = "python"] - 1L
+    )
     
-    size_embed <- tf$concat(list(height_embed, width_embed))
+    size_embed <- tf$concat(list(height_embed, width_embed), -1L)
     
     if (mode == "concat") 
       feature_concat <- tf$concat(list(area_mean, area_std, size_embed), -1L)
     else if (mode == "max_concat") {
-      c(area_max, unused, unused2) %<-% 
-        basic_pool(features, max_area_width, max_area_height)
+      area_max <-
+        basic_pool(features, max_area_width, max_area_height, height)[[1]]
       feature_concat <- tf$concat(list(area_max, size_embed), -1L)
     }
     else if (mode == "sum") 
@@ -330,17 +325,30 @@ compute_area_key <-
           area_mean + (area_std * tf$random$normal(tf$shape(area_std)))
       feature_concat <- area_mean + size_embed
     }
-    else 
-      stop(cat(paste("Unsupported area key mode", mode)))
+    else if (mode == "sample_sum") {
+      if (training)
+        area_mean <- area_mean * (area_std * tf$random$normal(tf$shape(area_std)))
+      feature_concat <- area_mean + size_embed
+    }
+    else
+      stop(sprintf("Unsupported area key mode %s", mode))
     
-    feature_hidden <- layer_dense(feature_concat, depth, activation = 'relu')
-    area_key       <- layer_dense(feature_hidden, depth)
+    feature_hidden <- 
+      layer_dense(feature_concat, depth, activation = hidden_activation)
+    
+    # Shape issue with calling keras_layer vs tf dense layer?
+    if (mode %in% c("concat", "max_concat"))
+      area_key <- tf$layers$dense(feature_hidden, depth)
+    else
+      area_key <- layer_dense(feature_hidden, depth)
     
     area_key
   }
-    
 
-#TODO: add dot_product_area_attention
+modes <- c("mean", "max", "concat", 
+           "sum", "sample", "sample_concat", 
+           "sample_sum", "max_concat")
+
 #' Dot product area attention
 #' 
 #' @param q Tensor with shape [..., length_q, depth_k].
@@ -378,19 +386,21 @@ dot_product_area_attention_1d <- function(q,
     training        = training)
   
   if (area_value_mode == "mean")
-    c(v_area, unused, unused2, unused3, unused4) %<-% basic_pool(
-      tf$reshape(v, list(-1L, length, depth)),
-      max_area_width,
-      max_area_height,
-      fn = tf$reduce_max)
+    v_area <- compute_area_features(tf$reshape(v, list(-1L, length, depth)),
+                                    max_area_width, max_area_height)[[1]]
+    # c(v_area, unused, unused2, unused3, unused4) %<-% basic_pool(
   else if (area_value_mode == "max")
-    c(v_area, unused, unused2, unused3, unused4) %<-% compute_area_features(
-      tf$reshape(v, list(-1L, length, depth)), max_area_width, max_area_height)
+    v_area <- basic_pool(tf$reshape(v, list(-1L, length, depth)),
+                         max_area_width,
+                         max_area_height,
+                         height,
+                         fn = tf$reduce_max)[[1]]
+    # c(v_area, unused, unused2, unused3, unused4) %<-% 
   else if (area_value_mode == "sum") {
-    c(unused, unused2, v_area, unused3, unused4) %<-% compute_area_features(
-      tf$reshape(v, list(-1L, length, depth)), 
-    max_area_width,
-    max_area_height)
+    v_area <- compute_area_features(tf$reshape(v, list(-1L, length, depth)),
+                                    max_area_width,
+                                    max_area_height)[[3]]
+    # c(unused, unused2, v_area, unused3, unused4) %<-% 
   }
   else stop(paste("Unsuported area value mode", mode))
   
@@ -405,15 +415,19 @@ dot_product_area_attention_1d <- function(q,
     mem_length <- bias_shape[[length(bias_shape)]]
     bias_value <- tf$reshape(
       tf$to_float(tf$less(bias, -1L)), list(-1L, mem_length, -1L))
+    
     c(unused, unuse2, padding_sum, unused3, unused4) %<-% 
       compute_area_features(bias_value, max_area_width, max_area_height)
+    
     bias <- tf$where(
       tf$cast(tf$to_int32(padding_sum), tf$bool),
       tf$fill(tf$shape(padding_sum), -Inf),
       tf$zeros_like(padding_sum, dtype = tf$float32))
+    
     bias <- 
       tf$reshape(bias,
                  list(bias_shape[[1]], bias_shape[[2]], bias_shape[[3]], -1L))
+    
     logits <- logits + bias
   }
   
@@ -433,7 +447,7 @@ dot_product_area_attention_1d <- function(q,
   
   weights <- layer_dropout(weights, dropout)
   
-  tf$matmul(weights, v)  
+  tf$matmul(weights, v)
 }
 
 
@@ -446,20 +460,22 @@ layer_multihead_attention <- function(query,
                                       output_depth = 128L,
                                       num_heads = 4L,
                                       dropout = 0,
-                                      attention_type = "dot_product_area",
+                                      attention_type = "dot_product",
                                       q_filter_width = 1L,
                                       kv_filter_width = 1L,
                                       q_padding = "same",
                                       kv_padding = "same",
-                                      max_area_width = NULL,
-                                      max_area_height = NULL,
+                                      max_area_width = 1L,
+                                      max_area_height = 1L,
                                       area_height = 1L,
                                       area_key_mode = "mean",
                                       area_value_mode = "sum",
                                       vars_3d = TRUE) {
   
   layer_lambda(list(query, memory), function(x) {
+    
     stopifnot(key_depth %% num_heads == 0, value_depth %% num_heads == 0)
+    
     if (typeof(x) == "list" & length(x) > 1) # if (any(grepl("list", class(x)))) 
       c(query, memory) %<-% x
     else 
@@ -484,37 +500,58 @@ layer_multihead_attention <- function(query,
       q %<>% `*`(key_depth_per_head^(-0.5))
     
     if (attention_type == "dot_product")
-      x <- dot_product_attention_1d(q, k, v, bias, dropout)
-    else if (attention_type == "dot_product_area")
-      x <- dot_product_area_attention_1d(
-        q, k, v, bias, dropout, max_area_width, max_area_height, area_height)
+      if (max_area_width > 1 || max_area_height > 1)
+        x <- dot_product_area_attention_1d(
+          q,
+          k,
+          v,
+          bias,
+          dropout,
+          max_area_width = max_area_width,
+          max_area_height = max_area_height,
+          area_height = area_height,
+          area_key_mode = area_key_mode,
+          area_value_mode = area_value_mode
+        )
+      else
+        x <- dot_product_attention_1d(q, k, v, bias, dropout)
     else
       stop(paste("attention_types other than (dot_product, dot_product_area)",
                  "currently unimplemented..."))
     
-    x       <- combine_heads(x)
-    x_shape <- shape_list2(x)
-    
+    x <- combine_heads(x)
     x <- 
       if (vars_3d)
-        tf$compat$v1$get_variable(
-          name  = "output_kernel_3d",
-          shape = list(num_heads,
-                       as.integer(value_depth %/% num_heads),
-                       output_depth),
-          initializer = tf$glorot_normal_initializer
-        ) %>% 
-        tf$cast(x$dtype) %>% 
+        tf$Variable(
+          tf$glorot_normal_initializer()(
+            shape = list(num_heads,
+                         as.integer(value_depth %/% num_heads),
+                         output_depth),
+            dtype = x$dtype
+        ), trainable = TRUE,
+           name = "output_kernel_3d") %>% 
         tf$reshape(list(value_depth, output_depth)) %>% 
         {tf$tensordot(x, ., axes = 1L)}
+        
+        # tf$compat$v1$get_variable(
+        #   name  = "output_kernel_3d",
+        #   shape = list(num_heads,
+        #                as.integer(value_depth %/% num_heads),
+        #                output_depth),
+        #   initializer = tf$glorot_normal_initializer
+        # ) %>% 
+        # tf$cast(x$dtype) %>% 
+        # tf$reshape(list(value_depth, output_depth)) %>% 
+        # {tf$tensordot(x, ., axes = 1L)}
       else  
-        tf$matmul(x,
-                  tf$get_variable(
-                    name  = "output_kernel",
-                    shape = list(x_shape[[length(x_shape)]], output_depth),
-                    dtype = x$dtype,
-                    trainable = TRUE
-                  ))
+        layer_dense(x, output_depth, use_bias = FALSE, name = "output_kernel")
+        # tf$matmul(x,
+        #           tf$get_variable(
+        #             name  = "output_kernel",
+        #             shape = list(x_shape[[length(x_shape)]], output_depth),
+        #             dtype = x$dtype,
+        #             trainable = TRUE
+        #           ))
     
     x
     
@@ -537,7 +574,7 @@ layer_multihead_attention <- function(query,
 #' @param dropout Float value to add dropout to attention function
 #' @param attention_type Character value of attention type
 #' @param vars_3d use 3-dimensional variables for input/output transformations
-#' TODO: hard_attention_k: integer, if > 0 triggers hard attention (picking top-k).
+#' TODO: hard_attention_k: integer, if > 0 triggers hard attention (pick top-k)
 #' @export
 #' TODO: Add callable option to attention_type
 multihead_attention <- function(query,
@@ -562,7 +599,7 @@ multihead_attention <- function(query,
   stopifnot(key_depth %% num_heads == 0, value_depth %% num_heads == 0)
 
   vars_3d_num_heads <- if (vars_3d) num_heads else 0
-  browser()
+
   c(q, k, v) %<-% compute_qkv(query, 
                               memory, 
                               key_depth, 
@@ -590,28 +627,33 @@ multihead_attention <- function(query,
 
   x <- combine_heads(x)
   # x_shape <- shape_list2(x)
-  
+
   x <- 
     if (vars_3d)
-      tf$compat$v1$get_variable(
-        name  = "output_kernel_3d",
-        shape = list(num_heads,
-                     as.integer(value_depth %/% num_heads),
-                     output_depth),
-        initializer = tf$glorot_normal_initializer
-      ) %>% 
-      tf$cast(x$dtype) %>% 
+      tf$Variable(
+        tf$glorot_normal_initializer()(
+          shape = list(num_heads,
+                       as.integer(value_depth %/% num_heads),
+                       output_depth),
+          dtype = x$dtype
+        ), trainable = TRUE,
+           name = "output_kernel_3d") %>% 
       tf$reshape(list(value_depth, output_depth)) %>% 
       {tf$tensordot(x, ., axes = 1L)}
+
+      # tf$compat$v1$get_variable(
+      #   name  = "output_kernel_3d",
+      #   shape = list(num_heads,
+      #                as.integer(value_depth %/% num_heads),
+      #                output_depth),
+      #   initializer = tf$glorot_normal_initializer
+      # ) %>% 
+      # tf$cast(x$dtype) %>% 
+      # tf$reshape(list(value_depth, output_depth)) %>% 
+      # {tf$tensordot(x, ., axes = 1L)}
     else
       layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
-      # tf$matmul(x,
-      #           tf$compat$v1$get_variable(
-      #             name  = "output_kernel",
-      #             shape = list(x_shape[[length(x_shape)]], output_depth),
-      #             dtype = x$dtype,
-      #             trainable = TRUE
-      #           ))
+  
   x
 }
 
@@ -631,7 +673,7 @@ dot_product_attention_1d <-
            bias = NULL,
            dropout = 0,
            name = "dot_product_attention") {
-    browser()
+
     q_shape <- shape_list2(q)
     scalar  <-
       tf$math$rsqrt(tf$cast(q_shape[[length(q_shape)]], tf$float32))
@@ -721,7 +763,7 @@ layer_self_attention_simple <-
       bias <- NULL
       x <- dot_product_attention_1d(q, k, v, bias, dropout)
       x <- tf$reshape(x, list(x_shape[[1]], x_shape[[2]], filter_depth))
-      x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_transform")
+      x <- layer_dense(x, output_depth, use_bias = FALSE, name = "output_layer")
       
       x
     }, name = "self_attention_simple")
@@ -751,15 +793,31 @@ layer_self_attention_simple <-
       
       if ("q" %in% name) stddev %<>% `*`(depth_per_head^(-0.5))
       
-      var <- tf$compat$v1$get_variable(
-        name,
-        shape = list(
-          input_depth,
-          vars_3d_num_heads,
-          as.integer(depth %/% vars_3d_num_heads)
+      # TODO: Add tf$variable_scope?
+      var <- tf$Variable(
+        tf$random$normal(
+          shape = list(
+            input_depth,
+            vars_3d_num_heads,
+            as.integer(depth %/% vars_3d_num_heads)
+          ),
+          stddev = stddev,
+          dtype = antecedent$dtype,
+          name = name
         ),
-        
-        initializer = tf$random_normal_initializer(stddev = stddev))
+        name = name,
+        trainable = TRUE
+      )
+      
+      # var <- tf$compat$v1$get_variable(
+      #   name,
+      #   shape = list(
+      #     input_depth,
+      #     vars_3d_num_heads,
+      #     as.integer(depth %/% vars_3d_num_heads)
+      #   ),
+      #   
+      #   initializer = tf$random_normal_initializer(stddev = stddev))
       
       var %<>% 
         tf$cast(dtype = antecedent$dtype) %>% 
@@ -772,7 +830,8 @@ layer_self_attention_simple <-
       if (filter_width == 1L) 
         layer_dense(antecedent, depth, use_bias = FALSE, name = name)
     else
-      layer_conv_1d(antecedent, depth, filter_width, padding = padding, name = name)
+      layer_conv_1d(antecedent, depth, filter_width, 
+                    padding = padding, name = name)
     
     out
   }, name = "compute_attention_component")
@@ -1155,7 +1214,7 @@ layer_local_self_attentionTF <-
                     attention_type = attention_type,
                     return_attention = return_attention,
                     mask = mask,
-                    kernel_initializer = tf$keras$initializers$get(kernel_initializer),
+                    kernel_initializer = tf$keras$initializers$get(kernel_initializer), 
                     bias_initializer = tf$keras$initializer$get(bias_initializer)
                )
   )
@@ -1367,7 +1426,6 @@ layer_local_self_attention <- function(object,
     )
   )
 }
-
 
 
 
